@@ -1,0 +1,19 @@
+rm mymutex
+rm mythread
+rm mysleep
+rm myhello
+rm mymemory
+rm myfile
+rm myoutoforder
+rm myread512
+rm myprint512
+
+rm hismutex
+rm histhread
+rm hissleep
+rm hishello
+rm hismemory
+rm hisfile
+rm hisoutoforder
+rm hisread512
+rm hisprint512
