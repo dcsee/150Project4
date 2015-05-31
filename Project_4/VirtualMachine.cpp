@@ -18,7 +18,7 @@ TVMStatus VMDirectoryOpen(const char *dirName, int *dirDescriptor){
 	MachineSuspendSignals(&sigState);
 	ThreadStore* tStore = ThreadStore::getInstance();
 
-//	printf("VMDirectoryOpen(): attempting to open directory '%s'\n", dirName);
+	printf("VMDirectoryOpen(): attempting to open directory '%s'\n", dirName);
 	
 	if((dirName == NULL) || (dirDescriptor == NULL)){
 		MachineResumeSignals(&sigState);
@@ -36,8 +36,6 @@ TVMStatus VMDirectoryRead(int dirDescriptor, SVMDirectoryEntryRef dirEnt){
 	TMachineSignalState sigState;	
 	MachineSuspendSignals(&sigState);
 	ThreadStore* tStore = ThreadStore::getInstance();
-
-	printf("VMDirectoryRead()\n");
 	
 	if(dirEnt == NULL){
 		printf("VMDirectoryRead(): dirEnt is null\n");
@@ -45,10 +43,10 @@ TVMStatus VMDirectoryRead(int dirDescriptor, SVMDirectoryEntryRef dirEnt){
 		return VM_STATUS_ERROR_INVALID_PARAMETER;
 	}
 
-	//try to read from the directory
-	FATController *fatController = tStore->getFATController();
-	SVMDirectoryEntry* dir = fatController->readDirectory(dirDescriptor);
+	FATController *fatController = tStore->getFATController();								
+	SVMDirectoryEntry* dir = fatController->readDirectory(dirDescriptor - 3);	//try to read from the directory, -3 since root dir starts at 3
 	
+	printf("VMDirectoryRead()\n");
 	if(dir != NULL){
 		*dirEnt = *dir;
 		MachineResumeSignals(&sigState);
@@ -454,40 +452,39 @@ TVMStatus VMFileClose(int filedescriptor){
 	return VM_STATUS_SUCCESS;
 }
 
-TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor){
-
-	printf("VMFileOpen(): filename is %s\n", filename);
+TVMStatus VMFileOpen(const char *fileName, int flags, int mode, int *fileDescriptor){
+	
 	TMachineSignalState sigState;			
 	MachineSuspendSignals(&sigState);	//suspend signals so we cannot be pre-empted while scheduling a new thread
 	ThreadStore* tStore = ThreadStore::getInstance();
-	TCB* currentThread = tStore->getCurrentThread();
-  
-	if ((filename == NULL) || (filedescriptor == NULL)){
+	FATController* fatController = tStore->getFATController();  
+
+//	printf("VMFileOpen(): filename is %s\n", fileName);
+	//TCB* currentThread = tStore->getCurrentThread();
+
+	if ((fileName == NULL) || (fileDescriptor == NULL)){
 		MachineResumeSignals (&sigState);
   	return VM_STATUS_ERROR_INVALID_PARAMETER;
 	}
+
+	//first, verify that file is in current directory
+	//not doing that right now
+	//
+	//next, get a file descriptor using openFileInCurrentDirectory
+	*fileDescriptor = fatController->openFileInCurrentDirectory(fileName);	
 	
-	MachineFileOpen(filename, flags, mode, &machineFileIOCallback, (void*)currentThread);
-	tStore->waitCurrentThreadOnIO();//resume execution here after IO completes
-	*filedescriptor = currentThread->getFileIOResult();	//return result by reference
-	
-	if(currentThread->getFileIOResult() < 0){	//if call to open() failed
-		MachineResumeSignals (&sigState);
-		return VM_STATUS_FAILURE;		//return failure state
-	}
+//	printf("VMFileOpen(): returning descriptor %d\n", *fileDescriptor);
 	
 	MachineResumeSignals (&sigState);
 	return VM_STATUS_SUCCESS;
 }
 
-TVMStatus VMFileRead(int filedescriptor, void *data, int *length){
+TVMStatus VMFileRead(int fileDescriptor, void *data, int *length){
 	TMachineSignalState sigState;			
 	MachineSuspendSignals(&sigState);	//suspend signals so we cannot be pre-empted while scheduling a new thread
 	ThreadStore* tStore = ThreadStore::getInstance();
-	MemoryPool* sharedMemory = tStore->findMemoryPoolByID((TVMMemoryPoolID)1);
+	MemoryPool* sharedMemoryPool = tStore->findMemoryPoolByID((TVMMemoryPoolID)1);
 	TCB* currentThread = tStore->getCurrentThread();
-	uint8_t* sharedLocation;
-	TVMMemorySize allocSize = *length;
 
 	//Step 0 - validation
 	if ((data == NULL) || (length == NULL)){
@@ -495,16 +492,28 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length){
   	return VM_STATUS_ERROR_INVALID_PARAMETER;
 	}
 
+	if(fileDescriptor >= 3){	//update the file descriptor to point to the fat image, and read from the FAT
+		printf("VMFileRead(): reading from descriptor %d\n", fileDescriptor);
+		tStore->getFATController()->readFileFromImage(fileDescriptor, (uint8_t*)data, length, sharedMemoryPool, currentThread);
+		MachineResumeSignals(&sigState);
+		return VM_STATUS_SUCCESS;
+	}
+	//if fileDescriptor < 3, continue doing a read as normal
+
+	uint8_t* sharedLocation;
+	TVMMemorySize allocSize = *length;
+//	printf("VMFileRead(): requesting read from %d\n", filedescriptor);
+
 	//Step 1 - initialize shared memory location, and wait if memory is not available from share pool
 	if(allocSize > 512){	//make sure thread never asks for > 512 bytes
 		allocSize = 512;
 	}
 
-	if(allocSize > sharedMemory->getSize()){
-		allocSize = sharedMemory->getSize();
+	if(allocSize > sharedMemoryPool->getSize()){
+		allocSize = sharedMemoryPool->getSize();
 	}
 
-	sharedLocation = sharedMemory->allocateMemory(allocSize);		//allocate a space in the shared memory pool
+	sharedLocation = sharedMemoryPool->allocateMemory(allocSize);		//allocate a space in the shared memory pool
 	
 	if(sharedLocation == NULL){
 		//if there isn't enough room in shared memory to do the IO, the current thread must wait until a chunk
@@ -519,16 +528,16 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length){
 	void *dataLocation = data;
 	int bytesTransferred = 0;
 	
-	if(bytesLeft > allocSize)
+	if((unsigned)bytesLeft > allocSize)
 		chunkSize = allocSize;
 
-	for(bytesLeft; bytesLeft > 0; bytesLeft -= chunkSize){
+	for(; bytesLeft > 0; bytesLeft -= chunkSize){
 
 		if(bytesLeft < chunkSize)
 			chunkSize = bytesLeft;
 
 		//read the amount of data specified by chunkSize into the location specified by sharedLocation
-		MachineFileRead(filedescriptor, (void*)sharedLocation, chunkSize, &machineFileIOCallback, (void*)currentThread);
+		MachineFileRead(fileDescriptor, (void*)sharedLocation, chunkSize, &machineFileIOCallback, (void*)currentThread);
 		tStore->waitCurrentThreadOnIO();															//resume execution here after IO completes
 		//copy chunkSize bytes of data from sharedLocation into dataLocation, starting at sharedLocation
 		memcpy(dataLocation, (void*)sharedLocation, chunkSize*sizeof(uint8_t));
@@ -584,10 +593,10 @@ TVMStatus VMFileWrite(int fileDescriptor, void* data, int *length){
 	void *dataLocation = data;
 	int bytesTransferred = 0;
 
-	if(bytesLeft > allocSize)
+	if((unsigned)bytesLeft > allocSize)
 		chunkSize = allocSize;
 
-	for(bytesLeft; bytesLeft > 0; bytesLeft -= chunkSize){
+	for(; bytesLeft > 0; bytesLeft -= chunkSize){
 
 		if(bytesLeft < chunkSize)
 			chunkSize = bytesLeft;

@@ -341,7 +341,7 @@ void MemoryPool::addChunk(MemoryChunk* chunk){
 	}
 	else{
 		//case 3: the new chunk must be inserted somewhere in the middle of the list, so find that place and put it there
-		for(int i = 0; i < allocatedChunkVector->size(); i++){
+		for(int i = 0; i < (int)allocatedChunkVector->size(); i++){
 			if(chunk->startAddress < (*allocatedChunkVector)[i]->startAddress){ //if the new chunk to be inserted begins BEFORE the current chunk,
 				allocatedChunkVector->insert(itr, chunk);	//insert the new chunk into the place before the current chunk
 				break;
@@ -422,16 +422,16 @@ uint8_t* MemoryPool::getNextSpace(TVMMemorySize size){
 	//Case 2: There is at least one allocated object. Solution: Check if there is space ahead of it. If there is, allocate that.
 	if(allocatedChunkVector->size() >= 1){
 		
-		if((allocatedChunkVector->front()->startAddress - baseAddress) >= size){	//if there is enough room in front of the first object,
+		if((allocatedChunkVector->front()->startAddress - baseAddress) >= (int)size){	//if there is enough room in front of the first object,
 //			printf("MemoryPool::getNextSpace(): MID %d found room in front of first object, allocating base address %d\n", id, baseAddress);
 			return baseAddress;																						//allocate the space in front
 		}
 
 		//Case 3: There is no room in front of the first object. Solution: try to allocate the space between objects.
-		for(int i = 0; i < allocatedChunkVector->size() - 1; i++){
+		for(int i = 0; i < (int)allocatedChunkVector->size() - 1; i++){
 
 			//If the space difference between beginning of the next object and the end of the current object, is big enough to hold the new object
-			if((*allocatedChunkVector)[i + 1]->startAddress - ((*allocatedChunkVector)[i]->startAddress + (*allocatedChunkVector)[i]->length) >= size){
+			if((*allocatedChunkVector)[i + 1]->startAddress - ((*allocatedChunkVector)[i]->startAddress + (*allocatedChunkVector)[i]->length) >= (int)size){
 //				printf("MemoryPool::getNextSpace(): MID %d allocated space between two objects\n", id);
 				return (*allocatedChunkVector)[i]->startAddress + (*allocatedChunkVector)[i]->length;	
 				//allocate the space at the end of the current object
@@ -439,7 +439,7 @@ uint8_t* MemoryPool::getNextSpace(TVMMemorySize size){
 		}
 			
 		//Case 4: There is no room in front of the list or in between objects. Solution: try to allocate behind the last object in the list.
-		if((baseAddress + poolSize) - (allocatedChunkVector->back()->startAddress + allocatedChunkVector->back()->length) >= size){
+		if((baseAddress + poolSize) - (allocatedChunkVector->back()->startAddress + allocatedChunkVector->back()->length) >= (int)size){
 			//If the space between the end of the pool and the end of the last object is greater than the size of the object we're trying to add,
 //			printf("MemoryPool::getNextSpace(): MID %d allocated chunk vector behind the last object\n", id);
 //			printf("MemoryPool::getNextSpace(): the length of the last object is %d\n", allocatedChunkVector->back()->length);
@@ -468,7 +468,7 @@ TVMMemorySize MemoryPool::getNumberOfUnallocatedBytes(){
 
 	TVMMemorySize unallocated = poolSize;
 
-	for(int i = 0; i < allocatedChunkVector->size(); i++){
+	for(int i = 0; i < (int)allocatedChunkVector->size(); i++){
 		unallocated = unallocated - (*allocatedChunkVector)[i]->length;
 	}
 	return unallocated;
@@ -515,15 +515,11 @@ MemoryPool::~MemoryPool(){
 FATController::FATController(const char* i){
 
 	image = i;
-	fat = new std::vector<uint8_t>();
-	rootDir = new std::vector<uint8_t>();
 	currentPath = new std::string("/");
 	directories = new std::vector<Directory*>();
 	directoryLocation = 0;
 	
 	if(image != NULL){
-		printf("FATController(): image is %s\n", image);
-		//read in the BPB
 		makeBPB();
 		makeFAT();
 		makeRootDir();
@@ -532,18 +528,211 @@ FATController::FATController(const char* i){
 		printf("FATController(): FAT image was null!\n");
 }
 
+const char* FATController::getImage(){
+	return image;
+}
+
+void FATController::makeBPB(){												//reads in the BPB
+	ThreadStore* tStore = ThreadStore::getInstance();
+	TCB* currentThread = tStore->getCurrentThread();
+	MemoryPool* sharedMemoryPool = tStore->findMemoryPoolByID(1);
+	uint8_t* BPBTemp = sharedMemoryPool->allocateMemory(BPB_SIZE);
+
+	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
+	tStore->waitCurrentThreadOnIO();
+	int fileDescriptor = currentThread->getFileIOResult();
+
+	sharedMemoryRead(BPBTemp, fileDescriptor, 0, BPB_SIZE, sharedMemoryPool);
+	MachineFileClose(fileDescriptor, &machineFileIOCallback, currentThread);
+	tStore->waitCurrentThreadOnIO();
+
+	bpb = new BPB();
+	
+	bpb->bytesPerSector = (BPBTemp[12] << 8) | BPBTemp[11];
+//	printf("FATController(): bytesPerSector = %d\n", bpb->bytesPerSector);
+	
+	bpb->sectorsPerCluster = BPBTemp[13];
+//	printf("FATController(): sectorsPerCluster = %d\n", bpb->sectorsPerCluster);
+	
+	bpb->reservedSectorCount = (BPBTemp[15] << 8) | BPBTemp[14];
+//	printf("FATController(): reservedSectorCount = %d\n", bpb->reservedSectorCount);
+	
+	bpb->numFATs = BPBTemp[16];
+//	printf("FATController(): numFATs = %d\n", bpb->numFATs);
+	
+	bpb->rootEntryCount = (BPBTemp[18] << 8) | BPBTemp[17];
+//	printf("FATController(): rootEntryCount = %d\n", bpb->rootEntryCount);
+	
+	if(BPBTemp[19] == 0)
+		bpb->totalSectors = (BPBTemp[35] << 24) | (BPBTemp[34] << 16) | (BPBTemp[33] << 8) | BPBTemp[32];
+	else
+		bpb->totalSectors = (BPBTemp[20] << 8) | BPBTemp[19];
+
+//	printf("FATController(): totalSectors = %d\n", bpb->totalSectors);
+
+	bpb->fatSizeSectors = (BPBTemp[23] << 8) | BPBTemp[22];
+	bpb->fatSizeBytes = bpb->bytesPerSector*(bpb->fatSizeSectors);
+//	printf("FATController(): fatSize = %d sectors\n", bpb->fatSizeSectors);
+
+	sharedMemoryPool->deallocate((uint8_t*)BPBTemp);	//done reading in the BPB here
+}
+
+void FATController::makeFAT(){											//reads in the FAT
+	ThreadStore* tStore = ThreadStore::getInstance();
+	TCB* currentThread = tStore->getCurrentThread();
+	MemoryPool* sharedMemoryPool = tStore->findMemoryPoolByID(1);
+	int fatStart = bpb->bytesPerSector*bpb->reservedSectorCount;
+	fat = new uint8_t[bpb->fatSizeBytes];
+	
+	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
+	tStore->waitCurrentThreadOnIO();
+	int fileDescriptor = currentThread->getFileIOResult();		
+
+	sharedMemoryRead(fat, fileDescriptor, fatStart, bpb->fatSizeBytes, sharedMemoryPool);
+	MachineFileClose(fileDescriptor, &machineFileIOCallback, currentThread);
+	tStore->waitCurrentThreadOnIO();
+//	for(int i = 0; i < bpb->fatSizeBytes; i++)
+//		printf("%d ", fat[i]);
+}
+
+void FATController::makeRootDir(){
+	ThreadStore* tStore = ThreadStore::getInstance();
+	MemoryPool* sharedMemoryPool = tStore->findMemoryPoolByID(1);
+	TCB* currentThread = tStore->getCurrentThread();
+	int firstRootSectorByteOffset = bpb->bytesPerSector*(bpb->reservedSectorCount + bpb->numFATs*bpb->fatSizeSectors);
+	int rootDirectorySizeBytes = (bpb->rootEntryCount*32);
+	rootDir = new uint8_t[rootDirectorySizeBytes];
+
+	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
+	tStore->waitCurrentThreadOnIO();
+	int fileDescriptor = currentThread->getFileIOResult();		
+
+	sharedMemoryRead(rootDir, fileDescriptor, firstRootSectorByteOffset, rootDirectorySizeBytes, sharedMemoryPool);
+	MachineFileClose(fileDescriptor, &machineFileIOCallback, currentThread);
+	tStore->waitCurrentThreadOnIO();
+
+	Directory* root = new Directory();
+	root->isFile = false;
+	root->childEntries = new std::vector<Directory*>();
+	root->selfSVM = NULL;
+	root->name = new std::string("/");
+	directories->push_back(root);
+
+	for(int i = 0; i < bpb->rootEntryCount; i+=32){
+		if(rootDir[i + 11] != 15){															//skips entries that aren't files or directories
+			SVMDirectoryEntry* entry = makeSVMDirectoryEntry(i);	//create Nitta's representation of the entry
+			Directory* directoryEntry = makeDirectoryEntry(i, entry);	//create my representation of the directory so I can include the first cluster location
+			root->childEntries->push_back(directoryEntry);				//store my representation
+		}
+	}
+}
+
+Directory* FATController::makeDirectoryEntry(int offset, SVMDirectoryEntry* entry){
+
+	Directory* directoryEntry = new Directory();
+
+	if(entry->DAttributes == 0)	//guess for now
+		directoryEntry->isFile = true;
+	else
+		directoryEntry->isFile = false;
+
+	directoryEntry->name = new std::string(entry->DShortFileName);
+//	printf("FATController::makeDirectoryEntry() - Entry %s has DAttributes: %d\n", entry->DShortFileName, entry->DAttributes);
+	directoryEntry->firstClusterLo = (uint16_t)((rootDir[offset + 27] << 8) | rootDir[offset + 26]);
+	directoryEntry->selfSVM = entry;
+	//uint16_t firstClusterHigh = (rootDir[offset + 21] << 8) | rootDir[offset + 20];
+	return directoryEntry;
+}
+
+SVMDirectoryEntry* FATController::makeSVMDirectoryEntry(int offset){
+
+	SVMDirectoryEntry* entry = new SVMDirectoryEntry();		
+	makeShortFileName(offset);
+
+	strcpy(entry->DShortFileName, makeShortFileName(offset));
+	entry->DAttributes = rootDir[offset + 11];														//add attributes to entry
+	
+	uint16_t time = (rootDir[offset + 15] << 8) | rootDir[offset + 14];		//extract creation date, time from root dir
+	uint16_t date = (rootDir[offset + 17] << 8) | rootDir[offset + 16];
+	SVMDateTime* create = calcDateTimeMasks(time, date);									//set root creation time
+	create->DHundredth = (unsigned char)rootDir[offset + 13];
+
+	time = 0;
+	date = (rootDir[offset + 19] << 8) | rootDir[offset + 18];						//extract and set last access date
+	SVMDateTime* access = calcDateTimeMasks(time, date);
+	access->DHundredth = 0;
+
+	time = (rootDir[offset + 23] << 8) | rootDir[offset + 22];						//extract and set write time
+	date = (rootDir[offset + 25] << 8) | rootDir[offset + 24];
+	SVMDateTime* write = calcDateTimeMasks(time, date);
+	write->DHundredth = 0;
+
+	entry->DCreate = *create;
+	entry->DAccess = *access;
+	entry->DModify = *write;
+	entry->DSize = (unsigned int)((rootDir[offset + 31] << 24) | (rootDir[offset + 30] << 16) | (rootDir[offset + 29] << 8) | rootDir[offset + 28]);	//dir file size
+	return entry;
+}
+
+const char* FATController::makeShortFileName(int offset){
+	char shortFileNameTemp[13];																//initialize short file name, extra space is for \0 if needed
+
+	for(int j = 0; j < 8; j++)
+			shortFileNameTemp[j] = rootDir[offset + j];
+	
+	for(int j = 8; j < 11; j++)
+			shortFileNameTemp[j + 1] = rootDir[offset + j];
+
+	shortFileNameTemp[8] = '.';
+	shortFileNameTemp[12] = '\0';
+	std::string shortFileName = std::string((const char*)shortFileNameTemp);
+
+	for(int i = 0; i < (int)shortFileName.size(); i++){
+		if(((int)shortFileName[i]) == 32){
+			shortFileName.erase(i, 1);
+			i--;
+		}
+	}
+	
+	if(shortFileName[shortFileName.length() - 1] == '.'){		//if the last character is a dot, remove it
+		shortFileName.erase(shortFileName.length() - 1, 1);
+	}
+	
+//	for(int i = 0; i < shortFileName.size(); i++){
+//		printf("shortFileName[%d] = %d = %c\n", i, (int)(shortFileName[i]), shortFileName[i]);
+//	}
+	
+	return shortFileName.c_str();
+}
+
+SVMDateTime* FATController::calcDateTimeMasks(uint16_t time, uint16_t date){
+	
+	SVMDateTime* dateTime = new SVMDateTime();	//create creation time
+	
+	dateTime->DSecond = (unsigned char)(time & 0x001F);									//bits 0 through 4 of create time are the seconds resolution
+	dateTime->DMinute = (unsigned char)((time & 0x05E0) >> 5);					//bits 5 through 10 of create time are the minutes resolution
+	dateTime->DHour 	= (unsigned char)((time & 0xF800) >> 11);					//bits 11 through 15 of create time are hour resolution
+	dateTime->DDay 		= (unsigned char)(date & 0x001F);									//bits 0 throuth 4 of create date are day resolution
+	dateTime->DMonth 	= (unsigned char)((date & 0x01E0) >> 5);					//bits 5 through 8 of create date are month resolution
+	dateTime->DYear 	= (unsigned int)(((date & 0xFE00) >> 9) + 1980);	//bits 9 through 15 of create date are year resolution
+
+	return dateTime;
+}
+
 void FATController::changeDirectory(const char* newPath){
+
 }
 
 SVMDirectoryEntry* FATController::readDirectory(int dirDescriptor){
 
-	printf("FATController::readDirectory()\n");
+//	printf("FATController::readDirectory()\n");
 	
 	if(dirDescriptor < (int)directories->size()){
 		Directory* dirToRead = (*directories)[dirDescriptor];
-		int range = dirToRead->entries->size();
+		int range = dirToRead->childEntries->size();
 		if(directoryLocation < range){
-			return (*(dirToRead->entries))[directoryLocation++];
+			SVMDirectoryEntry* directoryEntry = (*(dirToRead->childEntries))[directoryLocation++]->selfSVM;
+			return directoryEntry;
 		}
 		else{
 			printf("FATController::readDirectory() - directoryLocation %d out of range %d\n", directoryLocation, range);
@@ -557,10 +746,73 @@ SVMDirectoryEntry* FATController::readDirectory(int dirDescriptor){
 	}
 }
 
-const char* FATController::getCurrentDirectoryName(){
-	printf("FATController::getCurrentDirectoryName()\n");
-	return currentPath->c_str();
+void FATController::readFileFromImage(int fileDescriptor, uint8_t *data, int *length, MemoryPool* sharedMemoryPool, TCB* currentThread){
 
+	Directory* file = (*directories)[fileDescriptor - 2];	//-2 because 0, 1, and 2 are reserved for the stdin, out, err
+	int fatByteOffset = 0;
+	int firstDataSectorByteOffset = bpb->bytesPerSector*(bpb->reservedSectorCount + bpb->numFATs*bpb->fatSizeSectors) + (bpb->rootEntryCount*32);
+	int nextSectorOffset = (fat[file->firstClusterLo + 1] << 8) | fat[file->firstClusterLo];	//extract and set write time
+	uint8_t* sector = new uint8_t[bpb->bytesPerSector];
+
+	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
+	ThreadStore::getInstance()->waitCurrentThreadOnIO();
+	int imageFD = currentThread->getFileIOResult();
+
+	
+	while(nextSectorOffset != 0x0000){	//continue reading the FAT to find the next sector offsets
+		fatByteOffset += 2;
+		sharedMemoryRead(sector, imageFD, firstDataSectorByteOffset + (bpb->bytesPerSector)*nextSectorOffset, bpb->bytesPerSector, sharedMemoryPool);
+		nextSectorOffset = (fat[file->firstClusterLo + fatByteOffset + 1] << 8) | fat[file->firstClusterLo + fatByteOffset];	//extract and set write time
+		memcpy((void*)data, (void*)sector, bpb->bytesPerSector);
+		data = (uint8_t*)(data + (uint8_t)(bpb->bytesPerSector));
+	}
+
+	printf("FATController::readFileFromImage() - file = %s\n", file->name->c_str());
+	delete sector;
+	MachineFileClose(imageFD, &machineFileIOCallback, currentThread);
+	ThreadStore::getInstance()->waitCurrentThreadOnIO();
+}
+
+int FATController::openFileInCurrentDirectory(const char* fileName){
+
+	Directory* currentDirectory = NULL;
+
+	//first, look for the file specifically
+	for(int i = 0; i < (int)directories->size(); i++){
+		if(((*directories)[i]->isFile == true) && (strcmp((*directories)[i]->name->c_str(), fileName) == 0)){
+			printf("FATController::openFileInCurrentDirectory() - found file %s in open directories list\n", fileName);
+			//if the current open directory is not a file, and its location is the same as the current directory
+			return i + 2;
+			break;
+		}
+	}
+
+	if(currentDirectory == NULL){	//the file was not found, so look for it in the current directory
+
+		for(int i = 0; i < (int)directories->size(); i++){	//find the current directory in the directories vector
+			if(((*directories)[i]->isFile == false) && (strcmp((*directories)[i]->name->c_str(), currentPath->c_str()) == 0)){
+				//if the current open directory is not a file, and its location is the same as the current directory
+				currentDirectory = (*directories)[i];
+				break;
+			}
+		}
+		//hunt through the current open directory for a file matching fileName
+		std::vector<Directory*>* entries = currentDirectory->childEntries;
+		for(int i = 0; i < (int)entries->size(); i++){
+			if(strcmp((*entries)[i]->selfSVM->DShortFileName, fileName) == 0){
+				//if the entry specified by fileName exists in the current directory
+				directories->push_back((*entries)[i]);
+				return ((int)directories->size()) - 1 + 2;		//put it in the open directory list
+				//-1 because it will be used as an index	
+			}
+		}
+	}
+	return 0;
+}
+
+const char* FATController::getCurrentDirectoryName(){
+//	printf("FATController::getCurrentDirectoryName()\n");
+	return currentPath->c_str();
 }
 
 bool FATController::closeDirectory(int dirDescriptor){
@@ -573,18 +825,16 @@ bool FATController::closeDirectory(int dirDescriptor){
 
 bool FATController::rewindDirectory(int dirDescriptor){
 
-	//try to close the directory
 	printf("FATController::rewindDirectory()\n");
 	
 	return true;
-
 }
 
 int FATController::openDirectory(const char* dirName){
 	printf("FATController::openDirectory() attempting to open directory '%s'\n", dirName);
 	
 	if(strcmp(dirName, "/") == 0){	//if trying to open root
-		return 0;	//the root id is always zero
+		return 3;	//the root FD is always 3
 //			int rootDirIndex = findRootEntryByName(dirName);
 	//		read root entry to get date created, time created, dir_attr (file or directory type), short fil ename
 	//		read FAT to get size
@@ -600,198 +850,6 @@ int FATController::openDirectory(const char* dirName){
 	return 0;
 }
 
-void FATController::makeRootDir(){
-	ThreadStore* tStore = ThreadStore::getInstance();
-	TCB* currentThread = tStore->getCurrentThread();
-
-	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
-	tStore->waitCurrentThreadOnIO();
-	int imageFD = currentThread->getFileIOResult();
-	int rootDirSizeBytes = (bpb->rootEntryCount)*32;
-
-	if(imageFD > 0){	//read in root dir
-		MemoryPool* sharedMemory = tStore->findMemoryPoolByID(1);
-		uint8_t* rootDirTemp = sharedMemory->allocateMemory(rootDirSizeBytes);
-		MachineFileSeek(imageFD, BPB_SIZE + fatSizeBytes, SEEK_SET, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		printf("FATController::makeRootDir() - root dir is of size %d\n", rootDirSizeBytes);
-		MachineFileRead(imageFD, (void*)(rootDirTemp), rootDirSizeBytes, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		MachineFileClose(imageFD, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		
-		for(int i = 0; i < rootDirSizeBytes; i++){	//copy the root dir into a vector
-			rootDir->push_back(rootDirTemp[i]);
-		}
-
-		sharedMemory->deallocate(rootDirTemp);	//deallocate temp shared space for FAT
-		rootDirSectors = (((bpb->rootEntryCount * 32) + (bpb->bytesPerSector - 1)) / bpb->bytesPerSector);
-		startOfDataSectors = bpb->reservedSectorCount + (bpb->numFATs * bpb->fatSizeSectors) + rootDirSectors;
-		startOfDataBytes = startOfDataSectors * bpb->bytesPerSector;
-	}
-
-	//root dir is currently read into a BYTE VECTOR. need to parse it and make a STRUCT to represent the logical DIR
-
-	Directory* root = new Directory();
-	directories->push_back(root);
-	root->entries = new std::vector<SVMDirectoryEntry*>();
-	char dot = 0;
-
-	//read a single root dir entry into an SVMDirectoryEntry
-	for(int i = 0; i < ((int)rootDir->size())/32; i+=32){
-
-		SVMDirectoryEntry* entry = new SVMDirectoryEntry();		//create new directory entry
-
-		char shortFileName[13];																//initialize short file name, extra space is for \0 if needed
-
-		for(int j = 0, k = 0; j < 13; j++){										//copy short file name into temp array
-			if((*rootDir)[i + j] == ' '){													//if the filename is blank
-				if(dot == 0){																	//if a dot has not yet been added
-					dot = '.';																			//mark dot as added
-					shortFileName[i + k] = dot;											//add the dot and advance
-					k++;
-				}
-				continue;																					//continue to next iteration of loop
-			}
-			
-			if(j == 12){																				//if on last iteration
-				shortFileName[k] = '\0';													//insert null character
-				break;																						//end loop
-			}
-			else{
-				shortFileName[k] = (*rootDir)[i + j];								//copy character into shortFileName and advance
-				k++;
-			}
-		}
-		
-		strcpy(entry->DShortFileName, shortFileName);
-		entry->DAttributes = (*rootDir)[11];											//add attributes to entry
-		
-		uint8_t time = ((*rootDir)[15] << 8) | (*rootDir)[14];			//extract creation date, time from root dir
-		uint8_t date = ((*rootDir)[17] << 8) | (*rootDir)[16];
-		SVMDateTime* create = calcDateTimeMasks(time, date);	//set root creation time
-		create->DHundredth = (unsigned char)(*rootDir)[13];
-
-		time = 0;
-		date = ((*rootDir)[19] << 8) | (*rootDir)[18];							//extract and set last access date
-		SVMDateTime* access = calcDateTimeMasks(time, date);
-		access->DHundredth = 0;
-
-		uint16_t firstClusterHigh = ((*rootDir)[21] << 8) | (*rootDir)[20];
-
-		time = ((*rootDir)[23] << 8) | (*rootDir)[22];						//extract and set write time
-		date = ((*rootDir)[25] << 8) | (*rootDir)[24];
-		SVMDateTime* write = calcDateTimeMasks(time, date);
-		write->DHundredth = 0;
-
-		uint16_t firstClusterLow = ((*rootDir)[27] << 8) | (*rootDir)[26];
-
-		entry->DCreate = *create;
-		entry->DAccess = *access;
-		entry->DModify = *write;
-		entry->DSize = (unsigned char)(((*rootDir)[31] << 24) | ((*rootDir)[30] << 16) | ((*rootDir)[29] << 8) | (*rootDir)[28]);	//dir file size
-		root->entries->push_back(entry);
-	}
-}
-
-SVMDateTime* FATController::calcDateTimeMasks(uint8_t time, uint8_t date){
-	
-	SVMDateTime* dateTime = new SVMDateTime();	//create creation time
-	
-	dateTime->DSecond = (unsigned char)(time & 0x001F);	//bits 0 through 4 of create time are the seconds resolution
-	dateTime->DMinute = (unsigned char)(time & 0x05E0);	//bits 5 through 10 of create time are the minutes resolution
-	dateTime->DHour 	= (unsigned char)(time & 0xF800);	//bits 11 through 15 of create time are hour resolution
-	dateTime->DDay 		= (unsigned char)(date & 0x001F);	//bits 0 throuth 4 of create date are day resolution
-	dateTime->DMonth 	= (unsigned char)(date & 0x05E0);	//bits 5 through 8 of create date are month resolution
-	dateTime->DYear 	= (unsigned char)(date & 0xFE00);	//bits 9 through 15 of create date are year resolution
-
-	return dateTime;
-}
-
-void FATController::makeFAT(){											//reads in the FAT
-	ThreadStore* tStore = ThreadStore::getInstance();
-	TCB* currentThread = tStore->getCurrentThread();
-	fatSizeBytes = bpb->fatSizeSectors * bpb->bytesPerSector;
-
-	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
-	tStore->waitCurrentThreadOnIO();
-	int imageFD = currentThread->getFileIOResult();		
-	
-	if(imageFD > 0){	//read in the BPB
-		printf("FATController::makeFAT()\n");
-		MemoryPool* sharedMemory = tStore->findMemoryPoolByID(1);
-		uint8_t* FATTemp = sharedMemory->allocateMemory(fatSizeBytes);
-		MachineFileSeek(imageFD, BPB_SIZE, SEEK_SET, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		MachineFileRead(imageFD, (void*)(FATTemp), fatSizeBytes, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		MachineFileClose(imageFD, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-
-		for(int i = 0; i < fatSizeBytes; i++){	//copy the FAT into a vector
-			fat->push_back(FATTemp[i]);
-		}
-		sharedMemory->deallocate(FATTemp);	//deallocate temp shared space for FAT
-	}
-}
-
-void FATController::makeBPB(){												//reads in the BPB
-	ThreadStore* tStore = ThreadStore::getInstance();
-	TCB* currentThread = tStore->getCurrentThread();
-	
-	MachineFileOpen(image, O_RDONLY, 0644, &machineFileIOCallback, (void*)currentThread);		//open the fat image for reading
-	tStore->waitCurrentThreadOnIO();
-	int imageFD = currentThread->getFileIOResult();		
-
-	if(imageFD > 0){	//read in the BPB
-		printf("FATController::makeBPB()\n");
-		MemoryPool* sharedMemory = tStore->findMemoryPoolByID(1);
-		uint8_t* BPBTemp = sharedMemory->allocateMemory(BPB_SIZE);
-		MachineFileSeek(imageFD, 0, SEEK_SET, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		MachineFileRead(imageFD, (void*)(BPBTemp), BPB_SIZE, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-		MachineFileClose(imageFD, &machineFileIOCallback, currentThread);
-		tStore->waitCurrentThreadOnIO();
-	
-		bpb = new BPB();
-		
-		bpb->bytesPerSector = (BPBTemp[12] << 8) | BPBTemp[11];
-//		printf("FATController(): bytesPerSector = %d\n", bpb->bytesPerSector);
-		
-		bpb->sectorsPerCluster = BPBTemp[13];
-//		printf("FATController(): sectorsPerCluster = %d\n", bpb->sectorsPerCluster);
-		
-		bpb->reservedSectorCount = (BPBTemp[15] << 8) | BPBTemp[14];
-//		printf("FATController(): reservedSectorCount = %d\n", bpb->reservedSectorCount);
-		
-		bpb->numFATs = BPBTemp[16];
-//		printf("FATController(): numFATs = %d\n", bpb->numFATs);
-		
-		bpb->rootEntryCount = (BPBTemp[18] << 8) | BPBTemp[17];
-//		printf("FATController(): rootEntryCount = %d\n", bpb->rootEntryCount);
-		
-		if(BPBTemp[19] == 0)
-			bpb->totalSectors = (BPBTemp[35] << 24) | (BPBTemp[34] << 16) | (BPBTemp[33] << 8) | BPBTemp[32];
-		else
-			bpb->totalSectors = (BPBTemp[20] << 8) | BPBTemp[19];
-
-//		printf("FATController(): totalSectors = %d\n", bpb->totalSectors);
-
-		bpb->fatSizeSectors = (BPBTemp[23] << 8) | BPBTemp[22];
-//		printf("FATController(): fatSize = %d\n", bpb->fatSize);
-
-		sharedMemory->deallocate((uint8_t*)BPBTemp);	//done reading in the BPB here
-	}
-	else
-		printf("FATController::makeBPB() could not read FAT image!\n");
-}
-
-/*
-readRootDirectory(const char* dirName){
-	//performs a linear search of the root directory and builds a structure out of it
-}
-*/
 
 //==================================================================
 
@@ -802,7 +860,7 @@ readRootDirectory(const char* dirName){
 ThreadStore *ThreadStore::DUniqueInstance = NULL;
 
 void ThreadStore::createFATController(const char* image){
-	printf("createFATController(): image is %s\n", image);
+//	printf("createFATController(): image is %s\n", image);
 	fatController = new FATController(image);
 }
 
@@ -1351,6 +1409,46 @@ ThreadStore::~ThreadStore(){
 
 
 //=== Utilities ==================================================
+
+
+int sharedMemoryRead(uint8_t* destination, int fileDescriptor, int start, int length, MemoryPool *sharedMemoryPool){
+	
+	ThreadStore* tStore = ThreadStore::getInstance();
+	TCB* currentThread = tStore->getCurrentThread();
+	TVMMemorySize allocSize = length;
+	int bytesLeft = length;
+	int chunkSize = length;
+	int bytesRead = 0;
+	
+	if(allocSize >= 512)
+		allocSize = 512;
+	
+	uint8_t *sharedLocation = sharedMemoryPool->allocateMemory(allocSize);
+		
+	if(sharedLocation == NULL)
+		sharedLocation = tStore->waitCurrentThreadOnMemory(allocSize, 1);
+
+	if(bytesLeft > (int)allocSize)
+		chunkSize = allocSize;
+		
+	MachineFileSeek(fileDescriptor, start, SEEK_SET, &machineFileIOCallback, currentThread);
+	tStore->waitCurrentThreadOnIO();
+	
+	for(; bytesLeft > 0; bytesLeft -= chunkSize){
+
+		if(bytesLeft < chunkSize)
+			chunkSize = bytesLeft;
+
+		MachineFileRead(fileDescriptor, (void*)sharedLocation, chunkSize, &machineFileIOCallback, (void*)currentThread);
+		tStore->waitCurrentThreadOnIO();
+		memcpy((void*)destination, (void*)sharedLocation, (chunkSize*sizeof(uint8_t)));
+		destination = (uint8_t*)(destination + chunkSize);
+		bytesRead += chunkSize;
+	}
+	
+	sharedMemoryPool->deallocate(sharedLocation);
+	return bytesRead;
+}
 
 void safeEntry(void *functionAndParams){
 	//this is the skeleton function

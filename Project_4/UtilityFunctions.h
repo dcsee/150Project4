@@ -6,12 +6,15 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <iostream>
+#include <fstream>
 
 #define BPB_SIZE 55
 
 class ThreadStore;
 class TCB;
 class Mutex;
+class MemoryPool;
 
 typedef struct{
 	uint16_t bytesPerSector;
@@ -21,12 +24,20 @@ typedef struct{
 	uint16_t rootEntryCount;
 	int totalSectors;
 	uint16_t fatSizeSectors;
+	uint16_t fatSizeBytes;
 } BPB;
 
-typedef struct{
+typedef struct Directory {
+	bool isFile;
 	std::string* name;
-	std::vector<SVMDirectoryEntry*>* entries;
+	SVMDirectoryEntry* selfSVM;
+	uint16_t firstClusterLo;
+	std::vector<struct Directory*>* childEntries;
 } Directory;
+
+typedef struct{
+
+} DirectoryEntry;
 
 typedef struct{
 	Mutex *mutex;
@@ -55,7 +66,48 @@ void safeEntry(void *param);
 void timerInterrupt(void *calldata);	//accepts a VM_THREAD_PRIORITY
 void idle(void* parm1);
 void machineFileIOCallback(void* calledParam, int result);
+int sharedMemoryRead(uint8_t* destination, int fileDescriptor, int start, int length, MemoryPool *sharedMemoryPool);
 }
+
+#ifndef FATCONTROLLER_H
+#define FATCONTROLLER_H
+
+class FATController{
+
+	public:
+		FATController(const char* i);
+		const char* getImage();
+		void changeDirectory(const char* path);
+		int openDirectory(const char* dirName);
+		SVMDirectoryEntryRef readDirectory(int dirDescriptor);
+		const char* getCurrentDirectoryName();
+		bool closeDirectory(int dirDescriptor);
+		bool rewindDirectory(int dirDescriptor);
+		int openFileInCurrentDirectory(const char* fileName);
+		void readFileFromImage(int fileDescriptor, uint8_t *data, int *length, MemoryPool* sharedMemoryPool, TCB* currentThread);
+		uint8_t* fat;
+		uint8_t* rootDir;
+		BPB* bpb;
+
+	private:
+		std::string *currentPath;
+		void makeBPB();
+		void makeFAT();
+		void makeRootDir();
+		SVMDirectoryEntry* makeSVMDirectoryEntry(int offset);
+		Directory* makeDirectoryEntry(int offset, SVMDirectoryEntry* entry);
+		const char* makeShortFileName(int offset);
+		SVMDateTime* calcDateTimeMasks(uint16_t time, uint16_t date);
+		int rootDirSectors;
+		int rootDirSizeBytes;
+		int startOfDataSectors;
+		int startOfDataBytes;
+		int directoryLocation;
+		const char* image;
+		std::vector<Directory*>* directories;
+};
+
+#endif
 
 #ifndef MUTEX_H
 #define MUTEX_H
@@ -163,40 +215,6 @@ class MemoryPool{
 
 #endif
 
-#ifndef FATCONTROLLER_H
-#define FATCONTROLLER_H
-
-class FATController{
-
-	public:
-		FATController(const char* i);
-		void changeDirectory(const char* path);
-		int openDirectory(const char* dirName);
-		SVMDirectoryEntryRef readDirectory(int dirDescriptor);
-		const char* getCurrentDirectoryName();
-		bool closeDirectory(int dirDescriptor);
-		bool rewindDirectory(int dirDescriptor);
-
-	private:
-		std::string *currentPath;
-		void makeBPB();
-		void makeFAT();
-		void makeRootDir();
-		SVMDateTime* calcDateTimeMasks(uint8_t time, uint8_t date);
-		int fatSizeBytes;
-		int rootDirSectors;
-		int rootDirSizeBytes;
-		int startOfDataSectors;
-		int startOfDataBytes;
-		int directoryLocation;
-		const char* image;
-		std::vector<uint8_t>* fat;
-		std::vector<uint8_t>* rootDir;
-		std::vector<Directory*>* directories;
-		BPB* bpb;
-};
-
-#endif
 
 #ifndef THREADSTORE_H
 #define THREADSTORE_H
